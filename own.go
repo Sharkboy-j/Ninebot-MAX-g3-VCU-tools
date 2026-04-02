@@ -174,14 +174,29 @@ func changeMileage(data []byte, reader *bufio.Reader) string {
 }
 
 func transferKey(data []byte, reader *bufio.Reader) {
-	oldKey := data[secretKeyOffset : secretKeyOffset+secretKeyLength]
-
-	fmt.Print("🔑 Old key (hex): ")
-	for _, b := range oldKey {
-		fmt.Printf("%02X ", b)
+	lay, err := findSecretKeyLayout(data)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "❌ Key:", err)
+	} else {
+		oldKey, rerr := readKeyAtOffsets(data, lay)
+		if rerr != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "❌ Key:", rerr)
+		} else {
+			fmt.Print("🔑 Old key (hex): ")
+			for _, b := range oldKey {
+				fmt.Printf("%02X ", b)
+			}
+			fmt.Printf("\n📦 Old key (base64): %s", base64.StdEncoding.EncodeToString(oldKey))
+			if len(lay.offsets) > 1 {
+				fmt.Printf("\n📍 Key copies at offsets:")
+				for _, o := range lay.offsets {
+					fmt.Printf(" 0x%X", o)
+				}
+			} else {
+				fmt.Printf("\n📍 Key offset: 0x%X", lay.offsets[0])
+			}
+		}
 	}
-
-	fmt.Printf("\n📦 Old key (base64): %s", base64.StdEncoding.EncodeToString(oldKey))
 
 	fmt.Print("\nDo you want to transfer secret key from another file? (Y/N): ")
 	transfer, _ := reader.ReadString('\n')
@@ -201,14 +216,29 @@ func printKeys() {
 			os.Exit(1)
 		}
 		fmt.Printf("\n\n%s", f)
-		oldKey := d[secretKeyOffset : secretKeyOffset+secretKeyLength]
-
+		lay, err := findSecretKeyLayout(d)
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "\n❌ Key:", err)
+			continue
+		}
+		oldKey, rerr := readKeyAtOffsets(d, lay)
+		if rerr != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "\n❌ Key:", rerr)
+			continue
+		}
 		fmt.Print("\n🔑 Old key (hex): ")
 		for _, b := range oldKey {
 			fmt.Printf("%02X ", b)
 		}
-
 		fmt.Printf("\n📦 Old key (base64): %s", base64.StdEncoding.EncodeToString(oldKey))
+		if len(lay.offsets) > 1 {
+			fmt.Printf("\n📍 Offsets:")
+			for _, o := range lay.offsets {
+				fmt.Printf(" 0x%X", o)
+			}
+		} else {
+			fmt.Printf("\n📍 Offset: 0x%X", lay.offsets[0])
+		}
 	}
 
 	fmt.Println("\n✅ Press any key to exit")
