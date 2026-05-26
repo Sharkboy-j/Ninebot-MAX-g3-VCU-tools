@@ -39,10 +39,10 @@ func main() {
 	figure.NewFigure("MAX G3", "", true).Print()
 	figure.NewFigure("VCU TOOLS", "", true).Print()
 
-	fmt.Printf("\nNinebot MAX G3 VCU tools")
-	fmt.Printf("\nTested with 1.4.8, 1.4.5, 1.5.5 and 1.5.6 firmwares only")
+	fmt.Printf("\nNinebot MAX G3 VCU dump editor (change_sn)")
+	fmt.Printf("\nSupports firmware 1.4.8 – 1.6.x (auto-detected from dump)")
 	fmt.Printf("\n!!! You perform any actions at your own risk !!!")
-	fmt.Printf("\n\n\n\n")
+	fmt.Printf("\n\n\n")
 
 	err := os.Remove("MEMORY_G3.bin.patched.bin")
 	if err == nil {
@@ -67,6 +67,8 @@ func main() {
 	} else {
 		fmt.Printf("\n1)  I want to edit my OWN dump file")
 		fmt.Printf("\n2)  I want to flash other version of firmware")
+		fmt.Printf("\n3)  make my dump flashable with SHU")
+		fmt.Printf("\n4)  set firmware key manually (enter your own key)")
 		fmt.Printf("\nEnter: ")
 		transfer, _ := reader.ReadString('\n')
 
@@ -77,11 +79,13 @@ func main() {
 			editOwn(verify, reader)
 		case "2":
 			editCustom(reader)
+		case "3":
+			editMakeFlashableSHU(reader)
+		case "4":
+			editSetFirmwareKey(reader)
 		default:
-			{
-				fmt.Println("Invalid selection")
-				os.Exit(1)
-			}
+			fmt.Println("Invalid selection")
+			os.Exit(1)
 		}
 	}
 }

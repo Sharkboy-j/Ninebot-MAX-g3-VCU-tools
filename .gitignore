@@ -5,3 +5,6 @@ MEMORY_G3.bin.patched.bin
 build/*
 change_sn
 DUMPS/all/*
+*/**.bin
+DUMPS
+*.bin

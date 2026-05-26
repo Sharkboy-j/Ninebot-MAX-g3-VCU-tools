@@ -8,39 +8,20 @@ import (
 )
 
 func editCustom(reader *bufio.Reader) {
-	fmt.Print("\nChoose firmware version: ")
-	fmt.Print("\n1) 1.4.8")
-	fmt.Print("\n2) 1.5.4")
-	fmt.Print("\n3) 1.5.5 (BETA)")
-	fmt.Printf("\nEnter: ")
+	sourceData, _ := readSourceDumpForCustom(reader)
 
-	transfer, _ := reader.ReadString('\n')
-	transfer = strings.ToLower(strings.TrimSpace(transfer))
-
-	fileName := ""
-
-	switch transfer {
-	case "1":
-		fmt.Println("You selected 1.4.8")
-		fileName = "MEMORY_G3_1CGBC0000C0000_1.4.8_0.bin"
-	case "2":
-		fmt.Println("You selected 1.5.4")
-		fileName = "MEMORY_G3_1CGCС00007C0000_1.5.4.bin"
-	case "3":
-		fmt.Println("You selected 1.5.5")
-		fileName = "MEMORY_G3_1CGCC1234C1234_1.5.5.bin"
-	default:
-		{
-			fmt.Println("\nInvalid selection")
-			os.Exit(1)
-		}
-	}
-
-	data, err := os.ReadFile("DUMPS/" + fileName)
+	srcLay, err := findSecretKeyLayout(sourceData)
 	if err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "❌ Error reading file:", err)
+		_, _ = fmt.Fprintln(os.Stderr, "❌ Source key:", err)
 		os.Exit(1)
 	}
+	srcKey, err := readKeyAtOffsets(sourceData, srcLay)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "❌ Source key:", err)
+		os.Exit(1)
+	}
+
+	data, templateName := readTargetTemplate(reader)
 
 	fmt.Print("\nEnter new serial number (must be 14 characters like 1CGCC****C****): ")
 	newSerial, _ := reader.ReadString('\n')
@@ -52,26 +33,21 @@ func editCustom(reader *bufio.Reader) {
 	}
 
 	SetSn(data, newSerial, reader)
-	fmt.Print("Enter new mileage (0–65535): ")
-	mileageStr, _ := reader.ReadString('\n')
-	mileageStr = strings.TrimSpace(mileageStr)
 
-	SetMileage(data, mileageStr, reader)
-	fmt.Print("Enter new speed (1–125): ")
-	speedStr, _ := reader.ReadString('\n')
-	speedStr = strings.TrimSpace(speedStr)
-
-	SetSpeed(data, speedStr, reader)
-	SetUidKey(data, reader)
-
-	outFile := fileName + ".patched.bin"
-	err = os.WriteFile(outFile, data, 0644)
-	if err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "❌ Error writing output file:", err)
-		_, _ = reader.ReadString('\n')
+	if err := writeKeyAtSlots(data, mustFindVCUKeySlots(data), srcKey); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "\n❌ Key write:", err)
 		os.Exit(1)
 	}
+	fmt.Printf("\n✅ Secret key copied from your dump (%d bytes)\n", len(srcKey))
 
-	fmt.Println("✅ All changes written to:", outFile)
-	_, _ = reader.ReadString('\n')
+	writePatchedDump(templateName, data, reader)
+}
+
+func mustFindVCUKeySlots(data []byte) secretKeyLayout {
+	lay, err := findSecretKeyLayout(data)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "❌ Target key:", err)
+		os.Exit(1)
+	}
+	return lay
 }

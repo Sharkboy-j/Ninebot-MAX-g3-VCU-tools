@@ -4,33 +4,23 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
-	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 )
 
-var speedOffsets = []int{
-	0x1F08D,
-	0x1F091,
-	0x1F48D,
-	0x1F491,
-}
-
 const (
-	prefix               = "1CG"
-	skipSerial           = "1CGC0000000001"
-	serialLength         = 14
-	speedOffset1         = 0x0001F0C4
-	speedOffset2         = 0x0001F4C4
-	vcuKeyAnchor         = "SCOOTER_VCU_"
-	vcuKeySearchWindow   = 512
-	secretKeyLengthVCU   = 22
-	secretKeyTail0       = 0x30
-	secretKeyTail1       = 0xB4
-	secretKeyLegacyOff   = 0x1F5B4
-	secretKeyLegacyLen   = 12
+	prefix             = "1CG"
+	skipSerial         = "1CGC0000000001"
+	serialLength       = 14
+	vcuKeyAnchor       = "SCOOTER_VCU_"
+	vcuKeySearchWindow = 512
+	secretKeyLengthVCU = 22
+	secretKeyTail0     = 0x30
+	secretKeyTail1     = 0xB4
+	secretKeyLegacyOff = 0x1F5B4
+	secretKeyLegacyLen = 12
 )
 
 type secretKeyLayout struct {
@@ -42,27 +32,27 @@ func isVCUKeyByte(b byte) bool {
 	return (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
 }
 
-func findKeyStartInVCUWindow(win []byte) int {
+func hasVCUKeyAnchor(data []byte) bool {
+	anchor := []byte(vcuKeyAnchor)
+	for i := 0; i <= len(data)-len(anchor); i++ {
+		if bytes.Equal(data[i:i+len(anchor)], anchor) {
+			return true
+		}
+	}
+	return false
+}
+
+func findKeyStartInVCUWindowRelaxed(win []byte) int {
 	for j := secretKeyLengthVCU; j+2 <= len(win); j++ {
 		if win[j] != secretKeyTail0 || win[j+1] != secretKeyTail1 {
 			continue
 		}
-		keyStart := j - secretKeyLengthVCU
-		ok := true
-		for k := 0; k < secretKeyLengthVCU; k++ {
-			if !isVCUKeyByte(win[keyStart+k]) {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			return keyStart
-		}
+		return j - secretKeyLengthVCU
 	}
 	return -1
 }
 
-func findSecretKeyLayout(data []byte) (secretKeyLayout, error) {
+func findVCUKeySlots(data []byte) (secretKeyLayout, error) {
 	anchor := []byte(vcuKeyAnchor)
 	seen := make(map[int]struct{})
 	var offs []int
@@ -74,7 +64,7 @@ func findSecretKeyLayout(data []byte) (secretKeyLayout, error) {
 		if end > len(data) {
 			end = len(data)
 		}
-		rel := findKeyStartInVCUWindow(data[i:end])
+		rel := findKeyStartInVCUWindowRelaxed(data[i:end])
 		if rel < 0 {
 			continue
 		}
@@ -85,13 +75,133 @@ func findSecretKeyLayout(data []byte) (secretKeyLayout, error) {
 		seen[abs] = struct{}{}
 		offs = append(offs, abs)
 	}
-	if len(offs) > 0 {
-		return secretKeyLayout{offsets: offs, length: secretKeyLengthVCU}, nil
+	if len(offs) == 0 {
+		return secretKeyLayout{}, fmt.Errorf("secret key not found (no %q slot with 30 B4 tail)", vcuKeyAnchor)
+	}
+	return secretKeyLayout{offsets: offs, length: secretKeyLengthVCU}, nil
+}
+
+func findSecretKeyLayout(data []byte) (secretKeyLayout, error) {
+	if hasVCUKeyAnchor(data) {
+		return findVCUKeySlots(data)
 	}
 	if len(data) < secretKeyLegacyOff+secretKeyLegacyLen {
-		return secretKeyLayout{}, fmt.Errorf("secret key not found (no %q + key before 30 B4, and file too small for legacy key)", vcuKeyAnchor)
+		return secretKeyLayout{}, fmt.Errorf("secret key not found (no %q anchor and file too small for legacy key)", vcuKeyAnchor)
 	}
 	return secretKeyLayout{offsets: []int{secretKeyLegacyOff}, length: secretKeyLegacyLen}, nil
+}
+
+func isKeyAllFF(key []byte) bool {
+	for _, b := range key {
+		if b != 0xFF {
+			return false
+		}
+	}
+	return len(key) > 0
+}
+
+func printKeyInfo(key []byte, lay secretKeyLayout) {
+	if lay.length == secretKeyLengthVCU && isKeyAllFF(key) {
+		fmt.Print("\n🔑 Key: (erased, 0xFF × 22)")
+	} else if lay.length == secretKeyLengthVCU && isASCIIKey(key) {
+		fmt.Printf("\n🔑 Key (ASCII): %s", string(key))
+	}
+	fmt.Print("\n🔑 Key (hex): ")
+	for _, b := range key {
+		fmt.Printf("%02X ", b)
+	}
+	if lay.length == secretKeyLengthVCU && isKeyAllFF(key) == false {
+		fmt.Printf("\n📦 Key (base64): %s", base64.StdEncoding.EncodeToString(key))
+	}
+	if len(lay.offsets) > 1 {
+		fmt.Printf("\n📍 Key copies at offsets:")
+		for _, o := range lay.offsets {
+			fmt.Printf(" 0x%X", o)
+		}
+	} else {
+		fmt.Printf("\n📍 Key offset: 0x%X", lay.offsets[0])
+	}
+}
+
+func isASCIIKey(key []byte) bool {
+	if len(key) != secretKeyLengthVCU {
+		return false
+	}
+	for _, b := range key {
+		if !isVCUKeyByte(b) {
+			return false
+		}
+	}
+	return true
+}
+
+func readKeyAtOffsets(buf []byte, lay secretKeyLayout) ([]byte, error) {
+	if len(lay.offsets) == 0 {
+		return nil, fmt.Errorf("no key offsets")
+	}
+	first := lay.offsets[0]
+	if first+lay.length > len(buf) {
+		return nil, fmt.Errorf("key out of bounds")
+	}
+	key := buf[first : first+lay.length]
+	for _, o := range lay.offsets[1:] {
+		if o+lay.length > len(buf) {
+			return nil, fmt.Errorf("key copy out of bounds")
+		}
+		if !bytes.Equal(buf[o:o+lay.length], key) {
+			return nil, fmt.Errorf("key copies under %q differ in file", vcuKeyAnchor)
+		}
+	}
+	return key, nil
+}
+
+func writeKeyAtSlots(data []byte, lay secretKeyLayout, newKey []byte) error {
+	if len(newKey) != lay.length {
+		return fmt.Errorf("key length %d does not match slot length %d", len(newKey), lay.length)
+	}
+	for _, o := range lay.offsets {
+		if o+lay.length > len(data) {
+			return fmt.Errorf("write out of bounds at 0x%X", o)
+		}
+		copy(data[o:o+lay.length], newKey)
+	}
+	return nil
+}
+
+func parseManualKeyInput(input string) ([]byte, error) {
+	input = strings.TrimSpace(input)
+	if len(input) == 44 {
+		if isHexString(input) {
+			key, err := hex.DecodeString(input)
+			if err != nil {
+				return nil, fmt.Errorf("invalid hex key: %w", err)
+			}
+			if len(key) != secretKeyLengthVCU {
+				return nil, fmt.Errorf("hex key must decode to %d bytes", secretKeyLengthVCU)
+			}
+			return key, nil
+		}
+	}
+	if len(input) != secretKeyLengthVCU {
+		return nil, fmt.Errorf("key must be exactly %d ASCII characters or %d hex digits", secretKeyLengthVCU, secretKeyLengthVCU*2)
+	}
+	for i := 0; i < len(input); i++ {
+		if !isVCUKeyByte(input[i]) {
+			return nil, fmt.Errorf("invalid character at position %d (use A-Z, a-z, 0-9)", i+1)
+		}
+	}
+	return []byte(input), nil
+}
+
+func isHexString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func SetSn(data []byte, newSerial string, reader *bufio.Reader) {
@@ -122,68 +232,6 @@ func SetSn(data []byte, newSerial string, reader *bufio.Reader) {
 	}
 
 	fmt.Printf("\n✅ Replaced %d serial number(s)\n", count)
-}
-
-func SetMileage(data []byte, mileageStr string, reader *bufio.Reader) {
-	mileageVal, err := strconv.Atoi(mileageStr)
-	if err != nil || mileageVal < 0 || mileageVal > 0xFFFF {
-		_, _ = fmt.Fprintln(os.Stderr, "\n❌ Invalid mileage value (must be 0–65535)")
-		_, _ = reader.ReadString('\n')
-		os.Exit(1)
-	}
-	if err = writeUint16At(data, speedOffset1, uint16(mileageVal)); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "\n❌ Error writing mileage")
-		_, _ = reader.ReadString('\n')
-		os.Exit(1)
-	}
-
-	if err = writeUint16At(data, speedOffset2, uint16(mileageVal)); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "\n❌ Error writing mileage")
-		_, _ = reader.ReadString('\n')
-		os.Exit(1)
-	}
-
-	fmt.Printf("\n✅ Mileage 0x%04X written to both locations\n", mileageVal)
-}
-
-func SetSpeed(data []byte, speedStr string, reader *bufio.Reader) {
-	speedVal, err := strconv.Atoi(speedStr)
-	if err != nil || speedVal < 1 || speedVal > 125 {
-		_, _ = fmt.Fprintln(os.Stderr, "\n❌ Invalid speed value (must be 1–99)")
-		_, _ = reader.ReadString('\n')
-		os.Exit(1)
-	}
-
-	for _, offset := range speedOffsets {
-		err = writeByteAt(data, offset, byte(speedVal))
-		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "\n❌ Failed to write speed value\n")
-			_, _ = reader.ReadString('\n')
-			os.Exit(1)
-		}
-	}
-
-	fmt.Printf("\n✅ Speed 0x%02X written to all offsets\n", speedVal)
-}
-
-func readKeyAtOffsets(buf []byte, lay secretKeyLayout) ([]byte, error) {
-	if len(lay.offsets) == 0 {
-		return nil, fmt.Errorf("no key offsets")
-	}
-	first := lay.offsets[0]
-	if first+lay.length > len(buf) {
-		return nil, fmt.Errorf("key out of bounds")
-	}
-	key := buf[first : first+lay.length]
-	for _, o := range lay.offsets[1:] {
-		if o+lay.length > len(buf) {
-			return nil, fmt.Errorf("key copy out of bounds")
-		}
-		if !bytes.Equal(buf[o:o+lay.length], key) {
-			return nil, fmt.Errorf("key copies under %q differ in file", vcuKeyAnchor)
-		}
-	}
-	return key, nil
 }
 
 func SetUidKey(data []byte, reader *bufio.Reader) {
@@ -228,28 +276,18 @@ func SetUidKey(data []byte, reader *bufio.Reader) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("\n📦 New key (base64): %s", base64.StdEncoding.EncodeToString(newKey))
 	fmt.Print("\n🔑 New key (hex): ")
 	for _, b := range newKey {
 		fmt.Printf("%02X ", b)
 	}
+	if isKeyAllFF(newKey) == false {
+		fmt.Printf("\n📦 New key (base64): %s", base64.StdEncoding.EncodeToString(newKey))
+	}
 
-	for _, o := range tgtLay.offsets {
-		if o+tgtLay.length > len(data) {
-			_, _ = fmt.Fprintln(os.Stderr, "\n❌ Target write out of bounds")
-			_, _ = reader.ReadString('\n')
-			os.Exit(1)
-		}
-		copy(data[o:o+tgtLay.length], newKey)
+	if err := writeKeyAtSlots(data, tgtLay, newKey); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "\n❌", err)
+		_, _ = reader.ReadString('\n')
+		os.Exit(1)
 	}
 	fmt.Printf("\n✅ Secret key written at %d location(s)\n", len(tgtLay.offsets))
-}
-
-func writeUint16At(buf []byte, offset int, value uint16) error {
-	if offset+2 > len(buf) {
-		return fmt.Errorf("offset out of bounds")
-	}
-	binary.LittleEndian.PutUint16(buf[offset:], value)
-
-	return nil
 }
